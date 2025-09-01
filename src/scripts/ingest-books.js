@@ -2,10 +2,8 @@
 import fs from 'fs';
 import path from 'path';
 import OpenAI from 'openai';
-import { createClient } from '@supabase/supabase-js';
 import { fileURLToPath } from 'url';
-import EPub from 'epub';
-import { promisify } from 'util';
+import { saveBookChunks } from '../lib/local-storage.js';
 
 // ES module compatibility
 const __filename = fileURLToPath(import.meta.url);
@@ -16,15 +14,10 @@ const CHUNK_SIZE = 400; // Target tokens per chunk (roughly 300-500 words)
 const CHUNK_OVERLAP = 50; // Overlap between chunks to maintain context
 const BOOKS_DIRECTORY = path.join(__dirname, '..', 'books'); // Put your files here
 
-// Initialize clients
+// Initialize OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
 
 // Simple tokenizer approximation (1 token ≈ 0.75 words)
 function estimateTokens(text) {
@@ -74,35 +67,6 @@ function splitTextIntoChunks(text, chunkSize = CHUNK_SIZE, overlap = CHUNK_OVERL
   return chunks.filter(chunk => chunk.length > 50); // Filter out very short chunks
 }
 
-// Extract text from EPUB file
-async function extractEpubText(filePath) {
-  return new Promise((resolve, reject) => {
-    const epub = new EPub(filePath);
-    
-    epub.on('error', reject);
-    
-    epub.on('end', async () => {
-      try {
-        const chapters = epub.flow;
-        let fullText = '';
-        
-        for (const chapter of chapters) {
-          const getChapterText = promisify(epub.getChapter.bind(epub));
-          const chapterData = await getChapterText(chapter.id);
-          const cleanChapterText = cleanText(chapterData);
-          fullText += cleanChapterText + '\n\n';
-        }
-        
-        resolve(fullText);
-      } catch (error) {
-        reject(error);
-      }
-    });
-    
-    epub.parse();
-  });
-}
-
 // Generate embedding for a text chunk
 async function generateEmbedding(text) {
   try {
@@ -117,8 +81,13 @@ async function generateEmbedding(text) {
   }
 }
 
+// Generate unique ID for chunks
+function generateChunkId(bookTitle, chunkIndex) {
+  return `${bookTitle.replace(/[^a-zA-Z0-9]/g, '_')}_chunk_${chunkIndex}`;
+}
+
 // Process a single book file
-async function processBook(filePath) {
+async function processBook(filePath, allChunks) {
   console.log(`\n📖 Processing: ${path.basename(filePath)}`);
   
   try {
@@ -127,13 +96,10 @@ async function processBook(filePath) {
     const bookTitle = path.basename(filePath, ext);
     
     // Extract content based on file type
-    if (ext === '.epub') {
-      console.log('📚 Extracting EPUB content...');
-      content = await extractEpubText(filePath);
-    } else if (ext === '.txt') {
+    if (ext === '.txt') {
       content = fs.readFileSync(filePath, 'utf-8');
     } else {
-      console.log(`❌ Unsupported file format: ${ext}`);
+      console.log(`❌ Unsupported file format: ${ext} (only .txt supported without epub dependency)`);
       return 0;
     }
     
@@ -144,12 +110,15 @@ async function processBook(filePath) {
       return 0;
     }
     
+    // Clean the content
+    content = cleanText(content);
+    
     // Split into chunks
     const chunks = splitTextIntoChunks(content);
     console.log(`✂️  Created ${chunks.length} chunks`);
     
     // Process chunks in batches to avoid rate limits
-    const batchSize = 3; // Reduced for EPUB processing
+    const batchSize = 5;
     let processedCount = 0;
     
     for (let i = 0; i < chunks.length; i += batchSize) {
@@ -163,6 +132,7 @@ async function processBook(filePath) {
           const embedding = await generateEmbedding(chunk);
           
           return {
+            id: generateChunkId(bookTitle, globalIndex),
             content: chunk,
             embedding,
             metadata: {
@@ -182,23 +152,15 @@ async function processBook(filePath) {
       
       const embeddedChunks = (await Promise.all(embeddingPromises)).filter(Boolean);
       
-      // Insert batch into Supabase
-      if (embeddedChunks.length > 0) {
-        const { error } = await supabase
-          .from('book_chunks')
-          .insert(embeddedChunks);
-          
-        if (error) {
-          console.error('❌ Supabase insert error:', error);
-        } else {
-          processedCount += embeddedChunks.length;
-          console.log(`✅ Inserted batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(chunks.length/batchSize)} (${processedCount}/${chunks.length} chunks)`);
-        }
-      }
+      // Add to the main chunks array
+      allChunks.push(...embeddedChunks);
+      processedCount += embeddedChunks.length;
+      
+      console.log(`✅ Processed batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(chunks.length/batchSize)} (${processedCount}/${chunks.length} chunks)`);
       
       // Rate limiting: wait between batches
       if (i + batchSize < chunks.length) {
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
     
@@ -218,11 +180,7 @@ async function ingestBooks() {
   // Verify environment variables
   if (!process.env.OPENAI_API_KEY) {
     console.error('❌ OPENAI_API_KEY environment variable is required');
-    process.exit(1);
-  }
-  
-  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
-    console.error('❌ SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables are required');
+    console.log('Create a .env.local file with your OpenAI API key');
     process.exit(1);
   }
   
@@ -230,18 +188,20 @@ async function ingestBooks() {
   if (!fs.existsSync(BOOKS_DIRECTORY)) {
     console.log(`📁 Creating books directory: ${BOOKS_DIRECTORY}`);
     fs.mkdirSync(BOOKS_DIRECTORY, { recursive: true });
+    console.log('📚 Please add your .txt book files to this directory and run the script again');
+    return;
   }
   
   // Get all supported files in the books directory
   const supportedFiles = fs.readdirSync(BOOKS_DIRECTORY)
     .filter(file => {
       const ext = path.extname(file).toLowerCase();
-      return ext === '.txt' || ext === '.epub';
+      return ext === '.txt';
     })
     .map(file => path.join(BOOKS_DIRECTORY, file));
     
   if (supportedFiles.length === 0) {
-    console.error('❌ No supported files (.txt, .epub) found in the books directory');
+    console.error('❌ No supported files (.txt) found in the books directory');
     console.log(`📁 Please add your book files to: ${BOOKS_DIRECTORY}`);
     return;
   }
@@ -249,50 +209,31 @@ async function ingestBooks() {
   console.log(`📚 Found ${supportedFiles.length} book(s) to process:`);
   supportedFiles.forEach(file => console.log(`  - ${path.basename(file)}`));
   
-  // Test database connection
-  console.log('\n🔍 Testing database connection...');
-  const { data: testData, error: testError } = await supabase
-    .from('book_chunks')
-    .select('count(*)')
-    .limit(1);
-    
-  if (testError) {
-    console.error('❌ Database connection failed:', testError);
-    return;
-  }
-  console.log('✅ Database connection successful');
-  
-  // Clear existing chunks (optional)
-  console.log('\n🗑️  Clearing existing book chunks...');
-  const { error: deleteError } = await supabase
-    .from('book_chunks')
-    .delete()
-    .neq('id', '00000000-0000-0000-0000-000000000000');
-    
-  if (deleteError) {
-    console.error('❌ Error clearing existing chunks:', deleteError);
-  } else {
-    console.log('✅ Existing chunks cleared');
-  }
-  
-  // Process each book
-  let totalChunks = 0;
+  // Process each book and collect all chunks
+  let allChunks = [];
+  let totalProcessedChunks = 0;
   const startTime = Date.now();
   
   for (const filePath of supportedFiles) {
-    const chunkCount = await processBook(filePath);
-    totalChunks += chunkCount;
+    const chunkCount = await processBook(filePath, allChunks);
+    totalProcessedChunks += chunkCount;
+  }
+  
+  // Save all chunks to local storage
+  if (allChunks.length > 0) {
+    console.log(`\n💾 Saving ${allChunks.length} chunks to local storage...`);
+    await saveBookChunks(allChunks);
   }
   
   const endTime = Date.now();
   const duration = Math.round((endTime - startTime) / 1000);
   
   console.log(`\n🎉 Ingestion complete!`);
-  console.log(`📊 Total chunks processed: ${totalChunks}`);
+  console.log(`📊 Total chunks processed: ${totalProcessedChunks}`);
   console.log(`⏱️  Time taken: ${duration} seconds`);
-  console.log(`💰 Estimated OpenAI cost: $${(totalChunks * 0.00001).toFixed(4)} USD`);
+  console.log(`💰 Estimated OpenAI cost: $${(totalProcessedChunks * 0.00001).toFixed(4)} USD`);
   
-  if (totalChunks > 0) {
+  if (totalProcessedChunks > 0) {
     console.log(`\n🚀 Ready to test! Run 'npm run dev' and visit http://localhost:3000`);
   }
 }

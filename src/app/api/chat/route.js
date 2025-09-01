@@ -1,7 +1,7 @@
 // app/api/chat/route.js
 import { NextResponse } from 'next/server'
 import { generateEmbedding, generateChatResponse } from '@/lib/openai'
-import { searchBookChunks } from '@/lib/supabase'
+import { searchBookChunks } from '@/lib/local-storage'
 
 export async function POST(request) {
   try {
@@ -28,7 +28,7 @@ export async function POST(request) {
     // Step 1: Generate embedding for the user's question
     const questionEmbedding = await generateEmbedding(question)
 
-    // Step 2: Search for similar chunks in the book database
+    // Step 2: Search for similar chunks in the local storage
     const relevantChunks = await searchBookChunks(
       questionEmbedding,
       0.75, // Similarity threshold (0.75 = 75% similar)
@@ -51,7 +51,7 @@ export async function POST(request) {
 
     // Step 5: Prepare source information for the response
     const sources = relevantChunks.map((chunk, index) => ({
-      id: chunk.id,
+      id: chunk.id || `chunk-${index}`,
       bookTitle: chunk.metadata?.book_title || 'Unknown Book',
       chunkIndex: chunk.metadata?.chunk_index || index,
       similarity: Math.round(chunk.similarity * 100),
@@ -83,9 +83,9 @@ export async function POST(request) {
       )
     }
 
-    if (error.message.includes('database') || error.message.includes('supabase')) {
+    if (error.message.includes('chunks') || error.message.includes('storage')) {
       return NextResponse.json(
-        { error: 'Database connection error. Please try again later.' },
+        { error: 'Book data not available. Please run the ingestion script first.' },
         { status: 503 }
       )
     }
@@ -107,8 +107,21 @@ export async function POST(request) {
 
 // Handle GET requests (for health check)
 export async function GET() {
-  return NextResponse.json({
-    status: 'Chat API is running',
-    timestamp: new Date().toISOString()
-  })
+  try {
+    const { loadBookChunks } = await import('@/lib/local-storage');
+    const chunks = await loadBookChunks();
+    
+    return NextResponse.json({
+      status: 'Chat API is running',
+      timestamp: new Date().toISOString(),
+      chunksLoaded: chunks.length
+    })
+  } catch (error) {
+    return NextResponse.json({
+      status: 'Chat API is running',
+      timestamp: new Date().toISOString(),
+      chunksLoaded: 0,
+      warning: 'No book chunks found'
+    })
+  }
 }
