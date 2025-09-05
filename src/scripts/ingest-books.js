@@ -5,6 +5,10 @@ import OpenAI from 'openai';
 import { fileURLToPath } from 'url';
 import { saveBookChunks } from '../lib/local-storage.js';
 
+// Load environment variables from .env.local
+import dotenv from 'dotenv';
+dotenv.config({ path: '.env.local' });
+
 // ES module compatibility
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,10 +18,21 @@ const CHUNK_SIZE = 400; // Target tokens per chunk (roughly 300-500 words)
 const CHUNK_OVERLAP = 50; // Overlap between chunks to maintain context
 const BOOKS_DIRECTORY = path.join(__dirname, '..', 'books'); // Put your files here
 
-// Initialize OpenAI client
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// Initialize OpenAI client - with better error handling
+let openai;
+try {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY not found in environment variables');
+  }
+  
+  openai = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+  });
+  console.log(`✅ OpenAI client initialized with key: ${process.env.OPENAI_API_KEY.substring(0, 20)}...`);
+} catch (error) {
+  console.error('❌ Failed to initialize OpenAI client:', error.message);
+  process.exit(1);
+}
 
 // Simple tokenizer approximation (1 token ≈ 0.75 words)
 function estimateTokens(text) {
@@ -99,7 +114,7 @@ async function processBook(filePath, allChunks) {
     if (ext === '.txt') {
       content = fs.readFileSync(filePath, 'utf-8');
     } else {
-      console.log(`❌ Unsupported file format: ${ext} (only .txt supported without epub dependency)`);
+      console.log(`❌ Unsupported file format: ${ext} (only .txt supported)`);
       return 0;
     }
     
@@ -177,10 +192,29 @@ async function processBook(filePath, allChunks) {
 async function ingestBooks() {
   console.log('🚀 Starting book ingestion process...\n');
   
+  // Debug environment loading
+  console.log('🔍 Environment check:');
+  console.log(`   Working directory: ${process.cwd()}`);
+  console.log(`   API Key loaded: ${process.env.OPENAI_API_KEY ? 'Yes' : 'No'}`);
+  
   // Verify environment variables
   if (!process.env.OPENAI_API_KEY) {
     console.error('❌ OPENAI_API_KEY environment variable is required');
-    console.log('Create a .env.local file with your OpenAI API key');
+    console.log('📝 Make sure .env.local file exists in project root with:');
+    console.log('   OPENAI_API_KEY=your_openai_api_key_here');
+    process.exit(1);
+  }
+  
+  // Test OpenAI connection
+  try {
+    console.log('🧪 Testing OpenAI connection...');
+    await openai.models.list();
+    console.log('✅ OpenAI connection successful\n');
+  } catch (error) {
+    console.error('❌ OpenAI connection failed:', error.message);
+    if (error.message.includes('401')) {
+      console.log('💡 This usually means your API key is invalid');
+    }
     process.exit(1);
   }
   

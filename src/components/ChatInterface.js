@@ -1,18 +1,39 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
-import { Send, Bot, User, BookOpen, Loader2 } from 'lucide-react'
+import { Send, Bot, User, BookOpen, Loader2, AlertCircle, CheckCircle } from 'lucide-react'
 
 export default function ChatInterface() {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const [systemStatus, setSystemStatus] = useState(null)
   const messagesEndRef = useRef(null)
 
   // Auto-scroll to bottom when new messages are added
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  // Check system status on mount
+  useEffect(() => {
+    checkSystemStatus()
+  }, [])
+
+  const checkSystemStatus = async () => {
+    try {
+      const response = await fetch('/api/chat', { method: 'GET' })
+      const data = await response.json()
+      setSystemStatus(data)
+    } catch (error) {
+      console.error('Failed to check system status:', error)
+      setSystemStatus({ 
+        status: 'Error', 
+        chunksLoaded: 0, 
+        error: 'Failed to connect to API' 
+      })
+    }
+  }
 
   const sendMessage = async (e) => {
     e.preventDefault()
@@ -64,7 +85,7 @@ export default function ChatInterface() {
       setMessages(prev => [...prev, {
         id: Date.now() + 1,
         type: 'error',
-        content: 'Sorry, I encountered an error while processing your question. Please try again.',
+        content: `Sorry, I encountered an error: ${error.message}. Please check that your books have been ingested and your OpenAI API key is configured correctly.`,
         timestamp: new Date()
       }])
     } finally {
@@ -72,16 +93,43 @@ export default function ChatInterface() {
     }
   }
 
+  const StatusIndicator = () => {
+    if (!systemStatus) return null
+
+    return (
+      <div className={`px-3 py-2 rounded-lg text-sm flex items-center gap-2 ${
+        systemStatus.chunksLoaded > 0 
+          ? 'bg-green-50 text-green-700 border border-green-200' 
+          : 'bg-yellow-50 text-yellow-700 border border-yellow-200'
+      }`}>
+        {systemStatus.chunksLoaded > 0 ? (
+          <>
+            <CheckCircle className="w-4 h-4" />
+            Ready • {systemStatus.chunksLoaded} chunks loaded
+          </>
+        ) : (
+          <>
+            <AlertCircle className="w-4 h-4" />
+            No books found • Run ingestion script
+          </>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col h-screen bg-gray-50">
       {/* Header */}
       <div className="bg-white shadow-sm border-b border-gray-200 p-4">
-        <div className="max-w-4xl mx-auto flex items-center gap-3">
-          <BookOpen className="w-6 h-6 text-blue-600" />
-          <div>
-            <h1 className="text-xl font-semibold text-gray-900">AI Book Assistant</h1>
-            <p className="text-sm text-gray-600">Ask questions about your books</p>
+        <div className="max-w-4xl mx-auto">
+          <div className="flex items-center gap-3 mb-3">
+            <BookOpen className="w-6 h-6 text-blue-600" />
+            <div>
+              <h1 className="text-xl font-semibold text-gray-900">AI Book Assistant</h1>
+              <p className="text-sm text-gray-600">Ask questions about your books</p>
+            </div>
           </div>
+          <StatusIndicator />
         </div>
       </div>
 
@@ -92,23 +140,42 @@ export default function ChatInterface() {
             <div className="text-center py-12">
               <BookOpen className="w-16 h-16 text-gray-400 mx-auto mb-4" />
               <h3 className="text-lg font-medium text-gray-900 mb-2">Welcome to your AI Book Assistant</h3>
-              <p className="text-gray-600 mb-4">Ask me anything about your books and I'll find the relevant information for you.</p>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-w-2xl mx-auto">
-                <button
-                  onClick={() => setInput("What are the main themes discussed in the books?")}
-                  className="p-3 text-left bg-white rounded-lg border border-gray-200 hover:border-gray-300 transition-colors"
-                >
-                  <div className="font-medium text-sm">Main themes</div>
-                  <div className="text-xs text-gray-600">Explore key topics</div>
-                </button>
-                <button
-                  onClick={() => setInput("Can you summarize the key insights?")}
-                  className="p-3 text-left bg-white rounded-lg border border-gray-200 hover:border-gray-300 transition-colors"
-                >
-                  <div className="font-medium text-sm">Key insights</div>
-                  <div className="text-xs text-gray-600">Get important takeaways</div>
-                </button>
-              </div>
+              
+              {systemStatus?.chunksLoaded > 0 ? (
+                <>
+                  <p className="text-gray-600 mb-4">
+                    Ask me anything about your books. I have {systemStatus.chunksLoaded} chunks ready to search through.
+                  </p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-w-2xl mx-auto">
+                    <button
+                      onClick={() => setInput("What are the main themes discussed in the books?")}
+                      className="p-3 text-left bg-white rounded-lg border border-gray-200 hover:border-gray-300 transition-colors"
+                    >
+                      <div className="font-medium text-sm">Main themes</div>
+                      <div className="text-xs text-gray-600">Explore key topics</div>
+                    </button>
+                    <button
+                      onClick={() => setInput("Can you summarize the key insights from the sales book?")}
+                      className="p-3 text-left bg-white rounded-lg border border-gray-200 hover:border-gray-300 transition-colors"
+                    >
+                      <div className="font-medium text-sm">Key insights</div>
+                      <div className="text-xs text-gray-600">Get important takeaways</div>
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 max-w-2xl mx-auto">
+                  <p className="text-yellow-800 mb-3">No books found in the system.</p>
+                  <div className="text-sm text-yellow-700 space-y-1">
+                    <p><strong>To get started:</strong></p>
+                    <ol className="list-decimal list-inside space-y-1">
+                      <li>Add your .txt book files to the <code className="bg-yellow-100 px-1 rounded">src/books/</code> directory</li>
+                      <li>Run: <code className="bg-yellow-100 px-1 rounded">node src/scripts/ingest-books.js</code></li>
+                      <li>Restart the development server</li>
+                    </ol>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -138,7 +205,7 @@ export default function ChatInterface() {
                       <div className="flex items-center gap-2 mb-2">
                         <BookOpen className="w-4 h-4 text-gray-500" />
                         <span className="text-sm font-medium text-gray-700">
-                          Sources ({message.confidence}% confidence)
+                          Sources ({message.confidence}% confidence, {message.chunksFound} chunks found)
                         </span>
                       </div>
                       <div className="space-y-2">
@@ -192,14 +259,18 @@ export default function ChatInterface() {
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask a question about your books..."
-              disabled={isLoading}
+              placeholder={
+                systemStatus?.chunksLoaded > 0 
+                  ? "Ask a question about your books..." 
+                  : "Please ingest books first..."
+              }
+              disabled={isLoading || systemStatus?.chunksLoaded === 0}
               className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100"
               maxLength={1000}
             />
             <button
               type="submit"
-              disabled={!input.trim() || isLoading}
+              disabled={!input.trim() || isLoading || systemStatus?.chunksLoaded === 0}
               className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
             >
               <Send className="w-4 h-4" />

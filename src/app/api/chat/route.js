@@ -1,14 +1,12 @@
 // app/api/chat/route.js
 import { NextResponse } from 'next/server'
 import { generateEmbedding, generateChatResponse } from '@/lib/openai'
-import { searchBookChunks } from '@/lib/local-storage'
+import { searchBookChunks, getBookStats } from '@/lib/supabase'
 
 export async function POST(request) {
   try {
-    // Parse the request body
     const { question } = await request.json()
 
-    // Validate input
     if (!question || typeof question !== 'string' || question.trim().length === 0) {
       return NextResponse.json(
         { error: 'Question is required and must be a non-empty string' },
@@ -25,42 +23,64 @@ export async function POST(request) {
 
     console.log('Processing question:', question.substring(0, 100) + '...')
 
-    // Step 1: Generate embedding for the user's question
+    // Generate embedding for the user's question
     const questionEmbedding = await generateEmbedding(question)
 
-    // Step 2: Search for similar chunks in the local storage
-    const relevantChunks = await searchBookChunks(
+    // Search for similar chunks in Supabase with progressive thresholds
+    let relevantChunks = await searchBookChunks(
       questionEmbedding,
-      0.75, // Similarity threshold (0.75 = 75% similar)
-      5     // Number of chunks to retrieve
+      0.3, // Start with 30% similarity
+      10
     )
 
-    console.log(`Found ${relevantChunks.length} relevant chunks`)
+    console.log(`Found ${relevantChunks.length} chunks with 30% threshold`)
 
-    // Step 3: Check if we found any relevant content
+    if (relevantChunks.length === 0) {
+      relevantChunks = await searchBookChunks(
+        questionEmbedding,
+        0.2, // Try 20%
+        15
+      )
+      console.log(`Found ${relevantChunks.length} chunks with 20% threshold`)
+    }
+
+    if (relevantChunks.length === 0) {
+      relevantChunks = await searchBookChunks(
+        questionEmbedding,
+        0.1, // Try 10%
+        20
+      )
+      console.log(`Found ${relevantChunks.length} chunks with 10% threshold`)
+    }
+
     if (relevantChunks.length === 0) {
       return NextResponse.json({
         answer: "I cannot find any relevant information about that topic in the available books. Could you try rephrasing your question or asking about a different topic?",
         sources: [],
-        confidence: 0
+        confidence: 0,
+        chunksFound: 0
       })
     }
 
-    // Step 4: Generate response using GPT-4o with the relevant chunks
-    const answer = await generateChatResponse(question, relevantChunks)
+    // Take top 5 chunks for response
+    const topChunks = relevantChunks.slice(0, 5)
 
-    // Step 5: Prepare source information for the response
-    const sources = relevantChunks.map((chunk, index) => ({
-      id: chunk.id || `chunk-${index}`,
+    // Generate response using GPT-4o with the relevant chunks
+    const answer = await generateChatResponse(question, topChunks)
+
+    // Prepare source information with book titles and references
+    const sources = topChunks.map((chunk, index) => ({
+      id: chunk.id,
       bookTitle: chunk.metadata?.book_title || 'Unknown Book',
       chunkIndex: chunk.metadata?.chunk_index || index,
+      pageNumber: chunk.metadata?.page_number || null,
+      chapter: chunk.metadata?.chapter || null,
       similarity: Math.round(chunk.similarity * 100),
       preview: chunk.content.substring(0, 200) + '...'
     }))
 
-    // Calculate average confidence based on similarity scores
-    const averageConfidence = relevantChunks.length > 0 
-      ? Math.round(relevantChunks.reduce((sum, chunk) => sum + chunk.similarity, 0) / relevantChunks.length * 100)
+    const averageConfidence = topChunks.length > 0 
+      ? Math.round(topChunks.reduce((sum, chunk) => sum + chunk.similarity, 0) / topChunks.length * 100)
       : 0
 
     console.log('Response generated successfully')
@@ -74,54 +94,31 @@ export async function POST(request) {
 
   } catch (error) {
     console.error('Error in chat API:', error)
-
-    // Handle specific error types
-    if (error.message.includes('embedding')) {
-      return NextResponse.json(
-        { error: 'Failed to process your question. Please try again.' },
-        { status: 500 }
-      )
-    }
-
-    if (error.message.includes('chunks') || error.message.includes('storage')) {
-      return NextResponse.json(
-        { error: 'Book data not available. Please run the ingestion script first.' },
-        { status: 503 }
-      )
-    }
-
-    if (error.message.includes('OpenAI') || error.message.includes('API')) {
-      return NextResponse.json(
-        { error: 'AI service temporarily unavailable. Please try again.' },
-        { status: 503 }
-      )
-    }
-
-    // Generic error
     return NextResponse.json(
-      { error: 'An unexpected error occurred. Please try again.' },
+      { error: `An unexpected error occurred: ${error.message}` },
       { status: 500 }
     )
   }
 }
 
-// Handle GET requests (for health check)
+// Health check endpoint
 export async function GET() {
   try {
-    const { loadBookChunks } = await import('@/lib/local-storage');
-    const chunks = await loadBookChunks();
+    const stats = await getBookStats();
     
     return NextResponse.json({
       status: 'Chat API is running',
       timestamp: new Date().toISOString(),
-      chunksLoaded: chunks.length
+      chunksLoaded: stats.totalChunks,
+      booksLoaded: stats.totalBooks,
+      message: stats.totalChunks > 0 ? 'Ready to answer questions' : 'No book data found - upload books first'
     })
   } catch (error) {
     return NextResponse.json({
       status: 'Chat API is running',
       timestamp: new Date().toISOString(),
       chunksLoaded: 0,
-      warning: 'No book chunks found'
+      error: error.message
     })
   }
 }

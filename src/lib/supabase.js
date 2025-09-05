@@ -1,17 +1,33 @@
 // lib/supabase.js
 import { createClient } from '@supabase/supabase-js'
 
-// Create Supabase client for client-side operations (using anon key)
-export const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY
-)
+// Load environment variables
+import dotenv from 'dotenv'
+dotenv.config({ path: '.env.local' })
 
-// Create Supabase client for server-side operations (using service role key)
-export const supabaseAdmin = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-)
+// Get environment variables
+const supabaseUrl = process.env.SUPABASE_URL
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY
+
+if (!supabaseUrl) {
+  throw new Error('Missing SUPABASE_URL environment variable')
+}
+
+if (!supabaseServiceKey) {
+  throw new Error('Missing SUPABASE_SERVICE_ROLE_KEY environment variable')
+}
+
+// Create Supabase admin client (for server-side operations)
+export const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false
+  }
+})
+
+// Create regular Supabase client (for client-side operations)
+export const supabase = supabaseAnonKey ? createClient(supabaseUrl, supabaseAnonKey) : null
 
 // Function to search for similar book chunks
 export async function searchBookChunks(embedding, matchThreshold = 0.78, matchCount = 5) {
